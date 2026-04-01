@@ -11,10 +11,20 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "asimpy"
+version = "0.16.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/00/520976928d9c850f84bbf38438c72eae8cf6281556a2c7f94f16b40939a5/asimpy-0.16.0.tar.gz", hash = "sha256:ac3bb9e81e68af74ab1dc64ac094b5d8db37dab77c68d5c0ffa541699a1d3c91", size = 9927389, upload-time = "2026-03-14T02:15:45.686Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/0f/07b23b1250f9526779c1f800859d23ea17998e5cfd5ddd6eb9ffc744c6ef/asimpy-0.16.0-py3-none-any.whl", hash = "sha256:00dc89b92bd95210bda389bea26f01e739d552459057a6ca46caa06fd7c80b38", size = 20246, upload-time = "2026-03-14T02:15:43.638Z" },
+]
+
+[[package]]
 name = "calls"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "asimpy" },
     { name = "faker" },
     { name = "numpy" },
     { name = "pandas" },
@@ -30,6 +40,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "asimpy", specifier = ">=0.16.0" },
     { name = "faker", specifier = ">=40.12.0" },
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "pandas", specifier = ">=3.0.2" },

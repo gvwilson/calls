@@ -16,10 +16,11 @@ clean:
 	@rm -rf ./dist ./tmp
 	@find . -path './.venv' -prune -o -type d -name '__pycache__' -exec rm -rf {} +
 	@find . -path './.venv' -prune -o -type f -name '*~' -exec rm {} +
+	@rm -f *.db
 
 ## db: re-create database with defaults
 db:
-	@python calls.py --db calls.db
+	@python sim.py --db calls.db
 
 ## fix: fix code issues
 fix:
