@@ -9,6 +9,7 @@ import numpy as np
 from pathlib import Path
 import polars as pl
 import asimpy
+from asimpy.interrupt import Interrupt
 from sqlalchemy import create_engine
 
 SEED = 192738
@@ -39,6 +40,9 @@ CALL_ID_MISSING_FRAC = 0.05
 # Duration recorded for a call that finds no available agent (hours)
 CALL_FAILED_DURATION_HOURS = 1 / 60  # one minute
 
+# Time an agent spends on wrap-up after a call before returning to the pool (hours)
+AGENT_WRAPUP_TIME = 5 / 60  # five minutes
+
 
 def main():
     args = parse_args()
@@ -67,6 +71,17 @@ def hours_to_hms(hours):
     return f"{h}:{m:02d}:{s:02d}"
 
 
+def id_generator(stem, digits):
+    """Generate unique IDs of the form 'stemDDDD'."""
+
+    i = 1
+    while True:
+        temp = str(i)
+        assert len(temp) <= digits, f"ID generation overflow {stem}: {i}"
+        yield f"{stem}{temp.zfill(digits)}"
+        i += 1
+
+
 def make_agents(fake):
     return make_persons(fake, "A", NUM_AGENTS)
 
@@ -88,10 +103,11 @@ def make_clients(fake, rng):
 
 
 def make_persons(fake, prefix, num):
+    id_gen = id_generator(prefix, 4)
     return pl.from_dicts(
         [
             {
-                "ident": f"{prefix}{i:04d}",
+                "ident": next(id_gen),
                 "family": fake.last_name(),
                 "personal": fake.first_name(),
             }
@@ -158,25 +174,41 @@ def real_to_compacted(t):
 # ----------------------------------------------------------------------
 
 
-class Agent:
-    """A call center agent who handles one call at a time."""
+class Agent(asimpy.Process):
+    """A call center agent who handles calls then enters a wrap-up period.
 
-    def __init__(self, ident):
-        self.ident = ident
-        self.busy = False
+    Agents start in the shared pool. A Caller removes an agent from
+    the pool for the duration of a call, then interrupts the
+    agent. The agent waits before returning to the pool.
+    """
+
+    def init(self, rng, pool, details):
+        self.pool = pool
+        self.rng = rng
+        self.ident = details["ident"]
+        pool.append(self)
+
+    async def run(self):
+        while True:
+            try:
+                await self.timeout(float("inf"))  # idle: wait to be triggered
+            except Interrupt:
+                pass
+            await self.timeout(AGENT_WRAPUP_TIME)
+            self.pool.append(self)
 
 
 class Caller(asimpy.Process):
     """A client who places calls during working hours."""
 
-    def init(self, ident, call_interval, call_duration_mean, rng, agents, calls, call_counter):
-        self.ident = ident
-        self.call_interval = call_interval
-        self.call_duration_mean = call_duration_mean
+    def init(self, rng, pool, calls, call_id, details):
         self.rng = rng
-        self.agents = agents
+        self.pool = pool
         self.calls = calls
-        self.call_counter = call_counter  # shared mutable [int] across all callers
+        self.call_id = call_id
+        self.ident = details["ident"]
+        self.call_interval = details["call_interval"]
+        self.call_duration_mean = details["call_duration"]
 
     async def run(self):
         while True:
@@ -188,15 +220,10 @@ class Caller(asimpy.Process):
                 break
             await self.timeout(next_call - self.now)
 
-            # Assign a unique sequential call ID.
-            self.call_counter[0] += 1
-            call_id = f"X{self.call_counter[0]:05d}"
-
-            # Pick a random available agent; if none, the call fails.
-            available = [a for a in self.agents if not a.busy]
-            if available:
-                agent = self.rng.choice(available)
-                agent.busy = True
+            # Take a random agent from the pool; if empty, the call fails.
+            if self.pool:
+                idx = int(self.rng.integers(len(self.pool)))
+                agent = self.pool.pop(idx)
                 duration = self.rng.exponential(self.call_duration_mean)
                 agent_ident = agent.ident
             else:
@@ -206,7 +233,7 @@ class Caller(asimpy.Process):
 
             self.calls.append(
                 {
-                    "ident": call_id,
+                    "ident": next(self.call_id),
                     "caller": self.ident,
                     "agent": agent_ident,
                     "call_start": real_to_compacted(self.now),
@@ -217,25 +244,18 @@ class Caller(asimpy.Process):
             await self.timeout(duration)
 
             if agent is not None:
-                agent.busy = False
+                agent.interrupt("wrapup")
 
 
 def simulate(rng, clients, agents_df):
     env = asimpy.Environment()
-    agents = [Agent(row["ident"]) for row in agents_df.iter_rows(named=True)]
+    pool = []
+    for row in agents_df.iter_rows(named=True):
+        Agent(env, rng, pool, row)
     calls = []
-    call_counter = [0]
-    for cli in clients.iter_rows(named=True):
-        Caller(
-            env,
-            cli["ident"],
-            cli["call_interval"],
-            cli["call_duration"],
-            rng,
-            agents,
-            calls,
-            call_counter,
-        )
+    call_id = id_generator("X", 6)
+    for row in clients.iter_rows(named=True):
+        Caller(env, rng, pool, calls, call_id, row)
     env.run(until=SIMULATION_TIME)
     return pl.from_dicts(calls)
 
