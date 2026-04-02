@@ -50,7 +50,7 @@ def main():
 
     agents = make_agents(fake, rng)
     clients = make_clients(fake, rng)
-    records = simulate(rng, clients, agents)
+    records = simulate(args.shock, rng, clients, agents)
     mangle_calls(rng, records)
 
     engine = create_engine(f"sqlite:///{Path(args.db)}")
@@ -158,6 +158,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Synthesize call center data via DES")
     parser.add_argument("--db", help="Output database")
     parser.add_argument("--seed", type=int, default=SEED, help="RNG seed")
+    parser.add_argument("--shock", default=None, choices=["followup"], help="shocks to the system")
     return parser.parse_args()
 
 
@@ -195,12 +196,15 @@ class Agent(asimpy.Process):
     agent. The agent waits before returning to the pool.
     """
 
+    _all = []
+
     def init(self, rng, pool, records, details):
         self.pool = pool
         self.rng = rng
         self.records = records
         self.ident = details["ident"]
         self.followup_time = details["followup_time"]
+        Agent._all.append(self)
         pool.append(self)
 
     async def run(self):
@@ -224,6 +228,8 @@ class Agent(asimpy.Process):
 class Caller(asimpy.Process):
     """A client who places calls during working hours."""
 
+    _all = []
+
     def init(self, rng, pool, records, call_id, details):
         self.rng = rng
         self.pool = pool
@@ -232,6 +238,7 @@ class Caller(asimpy.Process):
         self.ident = details["ident"]
         self.call_interval = details["call_interval"]
         self.call_duration_mean = details["call_duration"]
+        Caller._all.append(self)
 
     async def run(self):
         while True:
@@ -271,7 +278,28 @@ class Caller(asimpy.Process):
                 agent.interrupt(call_id)
 
 
-def simulate(rng, clients, agents_df):
+class Shock(asimpy.Process):
+    """Applies system-wide shocks to the simulation at scheduled times.
+
+    1. At the halfway point, doubles the followup time of every Agent.
+    """
+
+    def init(self, shock):
+        self.shock = shock
+
+    async def run(self):
+        await self.timeout(SIMULATION_TIME / 2)
+        match self.shock:
+            case None:
+                pass
+            case "followup":
+                for agent in Agent._all:
+                    agent.followup_time *= 2
+            case _:
+                raise ValueError(f"unknown shock {self.shock}")
+
+
+def simulate(shock, rng, clients, agents_df):
     pool = []
     records = {
         "calls": [],
@@ -284,6 +312,7 @@ def simulate(rng, clients, agents_df):
         Agent(env, rng, pool, records, row)
     for row in clients.iter_rows(named=True):
         Caller(env, rng, pool, records, call_id, row)
+    Shock(env, shock)
     env.run(until=SIMULATION_TIME)
 
     for key, data in records.items():

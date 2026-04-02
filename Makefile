@@ -18,9 +18,13 @@ clean:
 	@find . -path './.venv' -prune -o -type f -name '*~' -exec rm {} +
 	@rm -f *.db
 
-## db: re-create database with defaults
-db:
+## noshock: re-create database with no shocks to the system
+noshock:
 	@python sim.py --db calls.db
+
+## followup: re-create database with increase in followup time
+followup:
+	@python sim.py --db calls.db --shock followup
 
 ## fix: fix code issues
 fix:
