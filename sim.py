@@ -124,8 +124,8 @@ def mangle_calls(rng, records):
     records["calls"] = records["calls"].with_columns(
         pl.when(pl.Series(null_id_indices))
         .then(None)
-        .otherwise(pl.col("caller"))
-        .alias("caller"),
+        .otherwise(pl.col("caller_id"))
+        .alias("caller_id"),
     )
 
 
@@ -184,9 +184,10 @@ class Agent(asimpy.Process):
     agent. The agent waits before returning to the pool.
     """
 
-    def init(self, rng, pool, details):
+    def init(self, rng, pool, records, details):
         self.pool = pool
         self.rng = rng
+        self.records = records
         self.ident = details["ident"]
         pool.append(self)
 
@@ -194,10 +195,18 @@ class Agent(asimpy.Process):
         while True:
             try:
                 await self.timeout(float("inf"))  # idle: wait to be triggered
-            except Interrupt:
-                pass
-            await self.timeout(AGENT_WRAPUP_TIME)
-            self.pool.append(self)
+            except Interrupt as wakeup:
+                start_time = self.now
+                await self.timeout(AGENT_WRAPUP_TIME)
+                self.records["followups"].append(
+                    {
+                        "ident": wakeup.cause,
+                        "agent_id": self.ident,
+                        "followup_start": real_hours_to_datetime(start_time),
+                        "followup_end": real_hours_to_datetime(self.now),
+                    }
+                )
+                self.pool.append(self)
 
 
 class Caller(asimpy.Process):
@@ -233,11 +242,12 @@ class Caller(asimpy.Process):
                 duration = CALL_FAILED_DURATION_HOURS
                 agent_ident = None
 
+            call_id = next(self.call_id)
             self.records["calls"].append(
                 {
-                    "ident": next(self.call_id),
-                    "caller": self.ident,
-                    "agent": agent_ident,
+                    "ident": call_id,
+                    "caller_id": self.ident,
+                    "agent_id": agent_ident,
                     "call_start": real_to_compacted(self.now),
                     "call_duration": hours_to_hms(duration),
                     "call_start_time": real_hours_to_datetime(self.now),
@@ -246,19 +256,20 @@ class Caller(asimpy.Process):
             await self.timeout(duration)
 
             if agent is not None:
-                agent.interrupt("wrapup")
+                agent.interrupt(call_id)
 
 
 def simulate(rng, clients, agents_df):
     pool = []
     records = {
         "calls": [],
+        "followups": [],
     }
     call_id = id_generator("X", 6)
 
     env = asimpy.Environment()
     for row in agents_df.iter_rows(named=True):
-        Agent(env, rng, pool, row)
+        Agent(env, rng, pool, records, row)
     for row in clients.iter_rows(named=True):
         Caller(env, rng, pool, records, call_id, row)
     env.run(until=SIMULATION_TIME)
