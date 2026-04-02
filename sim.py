@@ -23,6 +23,8 @@ CALL_DURATION_MU = 0.2
 CALL_FRAC_LONG = 0.2
 CALL_MULT_LONG = 2.0
 
+FOLLOWUP_DURATION_MU = 10 / 60 # 5 minutes
+
 SIMULATION_EPOCH = datetime(2025, 1, 6, 9, 0)
 WORK_HOURS_PER_DAY = 8
 WORK_DAYS_PER_WEEK = 5
@@ -40,16 +42,13 @@ CALL_ID_MISSING_FRAC = 0.05
 # Duration recorded for a call that finds no available agent (hours)
 CALL_FAILED_DURATION_HOURS = 1 / 60  # one minute
 
-# Time an agent spends on wrap-up after a call before returning to the pool (hours)
-AGENT_WRAPUP_TIME = 5 / 60  # five minutes
-
 
 def main():
     args = parse_args()
     rng = np.random.default_rng(args.seed)
     fake = Faker(locale=LOCALE)
 
-    agents = make_agents(fake)
+    agents = make_agents(fake, rng)
     clients = make_clients(fake, rng)
     records = simulate(rng, clients, agents)
     mangle_calls(rng, records)
@@ -84,8 +83,15 @@ def id_generator(stem, digits):
         i += 1
 
 
-def make_agents(fake):
-    return make_persons(fake, "A", NUM_AGENTS)
+def make_agents(fake, rng):
+    result = make_persons(fake, "A", NUM_AGENTS)
+    result = result.with_columns(
+        pl.Series(
+            "followup_time",
+            simple_uniform(rng, FOLLOWUP_DURATION_MU, result.height),
+        )
+    )
+    return result
 
 
 def make_clients(fake, rng):
@@ -93,7 +99,7 @@ def make_clients(fake, rng):
     result = result.with_columns(
         pl.Series(
             "call_interval",
-            np.random.lognormal(CALL_INTERVAL_MU, CALL_INTERVAL_SIGMA, result.height),
+            rng.lognormal(CALL_INTERVAL_MU, CALL_INTERVAL_SIGMA, result.height),
         )
     )
     num_long_callers = int(CALL_FRAC_LONG * NUM_CLIENTS)
@@ -173,6 +179,11 @@ def real_to_compacted(t):
     return (week * WORK_DAYS_PER_WEEK + day) * WORK_HOURS_PER_DAY + hour_of_day
 
 
+def simple_uniform(rng, mean, length):
+    """Generate uniform between 0.5*mean and 1.5*mean."""
+    return rng.uniform(0.5 * mean, 1.5 * mean, length)
+
+
 # ----------------------------------------------------------------------
 
 
@@ -189,6 +200,7 @@ class Agent(asimpy.Process):
         self.rng = rng
         self.records = records
         self.ident = details["ident"]
+        self.followup_time = details["followup_time"]
         pool.append(self)
 
     async def run(self):
@@ -197,7 +209,7 @@ class Agent(asimpy.Process):
                 await self.timeout(float("inf"))  # idle: wait to be triggered
             except Interrupt as wakeup:
                 start_time = self.now
-                await self.timeout(AGENT_WRAPUP_TIME)
+                await self.timeout(simple_uniform(self.rng, self.followup_time, None))
                 self.records["followups"].append(
                     {
                         "ident": wakeup.cause,
