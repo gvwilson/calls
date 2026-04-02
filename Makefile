@@ -1,6 +1,20 @@
 .PHONY: docs
 all: commands
 
+## simple: re-create database with no shocks to the system
+noshock:
+	@python sim.py --db calls.db
+
+## newclients: re-create database with new clients
+newclients:
+	@python sim.py --db calls.db --shock newclients
+
+## followup: re-create database with increase in followup time
+followup:
+	@python sim.py --db calls.db --shock followup
+
+## ---: ---
+
 ## commands: show available commands (*)
 commands:
 	@grep -h -E '^##' ${MAKEFILE_LIST} \
@@ -18,14 +32,6 @@ clean:
 	@find . -path './.venv' -prune -o -type f -name '*~' -exec rm {} +
 	@rm -f *.db
 
-## noshock: re-create database with no shocks to the system
-noshock:
-	@python sim.py --db calls.db
-
-## followup: re-create database with increase in followup time
-followup:
-	@python sim.py --db calls.db --shock followup
-
 ## fix: fix code issues
 fix:
 	ruff check --fix .
@@ -33,7 +39,3 @@ fix:
 ## format: format code
 format:
 	ruff format .
-
-## test: run tests
-test:
-	pytest tests

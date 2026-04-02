@@ -42,16 +42,22 @@ CALL_ID_MISSING_FRAC = 0.05
 # Duration recorded for a call that finds no available agent (hours)
 CALL_FAILED_DURATION_HOURS = 1 / 60  # one minute
 
+NEW_CLIENT_FRAC = 0.5
+
+# ----------------------------------------------------------------------
+
 
 def main():
     args = parse_args()
-    rng = np.random.default_rng(args.seed)
-    fake = Faker(locale=LOCALE)
 
-    agents = make_agents(fake, rng)
-    clients = make_clients(fake, rng)
-    records = simulate(args.shock, rng, clients, agents)
-    mangle_calls(rng, records)
+    world = World(args.seed, args.shock)
+    agents = make_agents(world, NUM_AGENTS)
+    clients = make_clients(world, NUM_CLIENTS)
+    records = simulate(world, clients, agents)
+
+    if world.more_clients is not None:
+        clients = pl.concat([clients, world.more_clients])
+    mangle_calls(world, records)
 
     engine = create_engine(f"sqlite:///{Path(args.db)}")
     with engine.connect() as conn:
@@ -59,6 +65,153 @@ def main():
             df.write_database(name, conn, if_table_exists="replace")
         for name, df in records.items():
             df.write_database(name, conn, if_table_exists="replace")
+
+
+# ----------------------------------------------------------------------
+
+
+class World:
+    """Hold simulation artefacts."""
+    def __init__(self, seed, shock):
+        self.rng = np.random.default_rng(seed)
+        self.shock = shock
+        self.fake = Faker(locale=LOCALE)
+        self.pool = []
+        self.calls = []
+        self.followups = []
+        self.client_id = id_generator("C", 4)
+        self.agent_id = id_generator("A", 4)
+        self.call_id = id_generator("X", 6)
+        self.more_clients = None
+
+
+class Agent(asimpy.Process):
+    """A call center agent who handles calls then enters a wrap-up period.
+
+    Agents start in the shared pool. A Client removes an agent from
+    the pool for the duration of a call, then interrupts the
+    agent. The agent waits before returning to the pool.
+    """
+
+    _all = []
+
+    def init(self, world, details):
+        self.world = world
+        self.ident = details["ident"]
+        self.followup_time = details["followup_time"]
+        Agent._all.append(self)
+        self.world.pool.append(self)
+
+    async def run(self):
+        while True:
+            try:
+                await self.timeout(float("inf"))  # idle: wait to be triggered
+            except Interrupt as wakeup:
+                start_time = self.now
+                await self.timeout(simple_uniform(self.world.rng, self.followup_time, None))
+                self.world.followups.append(
+                    {
+                        "ident": wakeup.cause,
+                        "agent_id": self.ident,
+                        "followup_start": real_hours_to_datetime(start_time),
+                        "followup_end": real_hours_to_datetime(self.now),
+                    }
+                )
+                self.world.pool.append(self)
+
+
+class Client(asimpy.Process):
+    """A client who places calls during working hours."""
+
+    _all = []
+
+    def init(self, world, details):
+        self.world = world
+        self.ident = details["ident"]
+        self.call_interval = details["call_interval"]
+        self.call_duration_mean = details["call_duration"]
+        Client._all.append(self)
+
+    async def run(self):
+        while True:
+            # Draw the next inter-call gap and skip forward to the next
+            # working window if the gap lands outside working hours.
+            interval = self.world.rng.exponential(self.call_interval)
+            next_call = next_work_time(self.now + interval)
+            if next_call >= SIMULATION_TIME:
+                break
+            await self.timeout(next_call - self.now)
+
+            # Take a random agent from the pool; if empty, the call fails.
+            if self.world.pool:
+                idx = int(self.world.rng.integers(len(self.world.pool)))
+                agent = self.world.pool.pop(idx)
+                duration = self.world.rng.exponential(self.call_duration_mean)
+                agent_ident = agent.ident
+            else:
+                agent = None
+                duration = CALL_FAILED_DURATION_HOURS
+                agent_ident = None
+
+            call_id = next(self.world.call_id)
+            self.world.calls.append(
+                {
+                    "ident": call_id,
+                    "client_id": self.ident,
+                    "agent_id": agent_ident,
+                    "call_start": real_to_compacted(self.now),
+                    "call_duration": hours_to_hms(duration),
+                    "call_start_time": real_hours_to_datetime(self.now),
+                }
+            )
+            await self.timeout(duration)
+
+            if agent is not None:
+                agent.interrupt(call_id)
+
+
+class Shock(asimpy.Process):
+    """Applies system-wide shocks to the simulation at scheduled times.
+
+    1. At the halfway point, doubles the followup time of every Agent.
+    """
+
+    def init(self, world):
+        self.world = world
+
+    async def run(self):
+        await self.timeout(SIMULATION_TIME / 2)
+        match self.world.shock:
+            case None:
+                pass
+
+            case "newclients":
+                num_new_clients = int(NEW_CLIENT_FRAC * NUM_CLIENTS)
+                self.world.more_clients = make_clients(self.world, num_new_clients)
+                for row in self.world.more_clients.iter_rows(named=True):
+                    Client(self._env, self.world, row)
+
+            case "followup":
+                for agent in Agent._all:
+                    agent.followup_time *= 2
+
+            case _:
+                raise ValueError(f"unknown shock {self.shock}")
+
+
+def simulate(world, clients, agents):
+    env = asimpy.Environment()
+    for row in agents.iter_rows(named=True):
+        Agent(env, world, row)
+    for row in clients.iter_rows(named=True):
+        Client(env, world, row)
+    Shock(env, world)
+    env.run(until=SIMULATION_TIME)
+
+    return {
+        "calls": pl.from_dicts(world.calls),
+        "followups": pl.from_dicts(world.followups),
+    }
 
 
 # ----------------------------------------------------------------------
@@ -83,35 +236,34 @@ def id_generator(stem, digits):
         i += 1
 
 
-def make_agents(fake, rng):
-    result = make_persons(fake, "A", NUM_AGENTS)
+def make_agents(world, num):
+    result = make_persons(world.fake, world.agent_id, num)
     result = result.with_columns(
         pl.Series(
             "followup_time",
-            simple_uniform(rng, FOLLOWUP_DURATION_MU, result.height),
+            simple_uniform(world.rng, FOLLOWUP_DURATION_MU, result.height),
         )
     )
     return result
 
 
-def make_clients(fake, rng):
-    result = make_persons(fake, "C", NUM_CLIENTS)
+def make_clients(world, num):
+    result = make_persons(world.fake, world.client_id, num)
     result = result.with_columns(
         pl.Series(
             "call_interval",
-            rng.lognormal(CALL_INTERVAL_MU, CALL_INTERVAL_SIGMA, result.height),
+            world.rng.lognormal(CALL_INTERVAL_MU, CALL_INTERVAL_SIGMA, result.height),
         )
     )
-    num_long_callers = int(CALL_FRAC_LONG * NUM_CLIENTS)
-    indices = rng.choice(NUM_CLIENTS, size=num_long_callers, replace=False)
-    call_duration = np.full(NUM_CLIENTS, CALL_DURATION_MU)
+    num_long_callers = int(CALL_FRAC_LONG * num)
+    indices = world.rng.choice(num, size=num_long_callers, replace=False)
+    call_duration = np.full(num, CALL_DURATION_MU)
     call_duration[indices] = CALL_MULT_LONG * CALL_DURATION_MU
     result = result.with_columns(pl.Series("call_duration", call_duration))
     return result
 
 
-def make_persons(fake, prefix, num):
-    id_gen = id_generator(prefix, 4)
+def make_persons(fake, id_gen, num):
     return pl.from_dicts(
         [
             {
@@ -124,14 +276,14 @@ def make_persons(fake, prefix, num):
     )
 
 
-def mangle_calls(rng, records):
+def mangle_calls(world, records):
     """Add messiness to call data."""
-    null_id_indices = rng.random(records["calls"].height) < CALL_ID_MISSING_FRAC
+    null_id_indices = world.rng.random(records["calls"].height) < CALL_ID_MISSING_FRAC
     records["calls"] = records["calls"].with_columns(
         pl.when(pl.Series(null_id_indices))
         .then(None)
-        .otherwise(pl.col("caller_id"))
-        .alias("caller_id"),
+        .otherwise(pl.col("client_id"))
+        .alias("client_id"),
     )
 
 
@@ -158,7 +310,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Synthesize call center data via DES")
     parser.add_argument("--db", help="Output database")
     parser.add_argument("--seed", type=int, default=SEED, help="RNG seed")
-    parser.add_argument("--shock", default=None, choices=["followup"], help="shocks to the system")
+    parser.add_argument("--shock", default=None, choices=["followup", "newclients"], help="shocks to the system")
     return parser.parse_args()
 
 
@@ -183,141 +335,6 @@ def real_to_compacted(t):
 def simple_uniform(rng, mean, length):
     """Generate uniform between 0.5*mean and 1.5*mean."""
     return rng.uniform(0.5 * mean, 1.5 * mean, length)
-
-
-# ----------------------------------------------------------------------
-
-
-class Agent(asimpy.Process):
-    """A call center agent who handles calls then enters a wrap-up period.
-
-    Agents start in the shared pool. A Caller removes an agent from
-    the pool for the duration of a call, then interrupts the
-    agent. The agent waits before returning to the pool.
-    """
-
-    _all = []
-
-    def init(self, rng, pool, records, details):
-        self.pool = pool
-        self.rng = rng
-        self.records = records
-        self.ident = details["ident"]
-        self.followup_time = details["followup_time"]
-        Agent._all.append(self)
-        pool.append(self)
-
-    async def run(self):
-        while True:
-            try:
-                await self.timeout(float("inf"))  # idle: wait to be triggered
-            except Interrupt as wakeup:
-                start_time = self.now
-                await self.timeout(simple_uniform(self.rng, self.followup_time, None))
-                self.records["followups"].append(
-                    {
-                        "ident": wakeup.cause,
-                        "agent_id": self.ident,
-                        "followup_start": real_hours_to_datetime(start_time),
-                        "followup_end": real_hours_to_datetime(self.now),
-                    }
-                )
-                self.pool.append(self)
-
-
-class Caller(asimpy.Process):
-    """A client who places calls during working hours."""
-
-    _all = []
-
-    def init(self, rng, pool, records, call_id, details):
-        self.rng = rng
-        self.pool = pool
-        self.records = records
-        self.call_id = call_id
-        self.ident = details["ident"]
-        self.call_interval = details["call_interval"]
-        self.call_duration_mean = details["call_duration"]
-        Caller._all.append(self)
-
-    async def run(self):
-        while True:
-            # Draw the next inter-call gap and skip forward to the next
-            # working window if the gap lands outside working hours.
-            interval = self.rng.exponential(self.call_interval)
-            next_call = next_work_time(self.now + interval)
-            if next_call >= SIMULATION_TIME:
-                break
-            await self.timeout(next_call - self.now)
-
-            # Take a random agent from the pool; if empty, the call fails.
-            if self.pool:
-                idx = int(self.rng.integers(len(self.pool)))
-                agent = self.pool.pop(idx)
-                duration = self.rng.exponential(self.call_duration_mean)
-                agent_ident = agent.ident
-            else:
-                agent = None
-                duration = CALL_FAILED_DURATION_HOURS
-                agent_ident = None
-
-            call_id = next(self.call_id)
-            self.records["calls"].append(
-                {
-                    "ident": call_id,
-                    "caller_id": self.ident,
-                    "agent_id": agent_ident,
-                    "call_start": real_to_compacted(self.now),
-                    "call_duration": hours_to_hms(duration),
-                    "call_start_time": real_hours_to_datetime(self.now),
-                }
-            )
-            await self.timeout(duration)
-
-            if agent is not None:
-                agent.interrupt(call_id)
-
-
-class Shock(asimpy.Process):
-    """Applies system-wide shocks to the simulation at scheduled times.
-
-    1. At the halfway point, doubles the followup time of every Agent.
-    """
-
-    def init(self, shock):
-        self.shock = shock
-
-    async def run(self):
-        await self.timeout(SIMULATION_TIME / 2)
-        match self.shock:
-            case None:
-                pass
-            case "followup":
-                for agent in Agent._all:
-                    agent.followup_time *= 2
-            case _:
-                raise ValueError(f"unknown shock {self.shock}")
-
-
-def simulate(shock, rng, clients, agents_df):
-    pool = []
-    records = {
-        "calls": [],
-        "followups": [],
-    }
-    call_id = id_generator("X", 6)
-
-    env = asimpy.Environment()
-    for row in agents_df.iter_rows(named=True):
-        Agent(env, rng, pool, records, row)
-    for row in clients.iter_rows(named=True):
-        Caller(env, rng, pool, records, call_id, row)
-    Shock(env, shock)
-    env.run(until=SIMULATION_TIME)
-
-    for key, data in records.items():
-        records[key] = pl.from_dicts(data)
-    return records
 
 
 # ----------------------------------------------------------------------
