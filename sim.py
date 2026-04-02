@@ -51,12 +51,14 @@ def main():
 
     agents = make_agents(fake)
     clients = make_clients(fake, rng)
-    calls = simulate(rng, clients, agents)
-    calls = mangle_calls(rng, calls)
+    records = simulate(rng, clients, agents)
+    mangle_calls(rng, records)
 
     engine = create_engine(f"sqlite:///{Path(args.db)}")
     with engine.connect() as conn:
-        for name, df in (("agent", agents), ("client", clients), ("call", calls)):
+        for name, df in (("agent", agents), ("client", clients)):
+            df.write_database(name, conn, if_table_exists="replace")
+        for name, df in records.items():
             df.write_database(name, conn, if_table_exists="replace")
 
 
@@ -116,10 +118,10 @@ def make_persons(fake, prefix, num):
     )
 
 
-def mangle_calls(rng, calls):
+def mangle_calls(rng, records):
     """Add messiness to call data."""
-    null_id_indices = rng.random(calls.height) < CALL_ID_MISSING_FRAC
-    return calls.with_columns(
+    null_id_indices = rng.random(records["calls"].height) < CALL_ID_MISSING_FRAC
+    records["calls"] = records["calls"].with_columns(
         pl.when(pl.Series(null_id_indices))
         .then(None)
         .otherwise(pl.col("caller"))
@@ -201,10 +203,10 @@ class Agent(asimpy.Process):
 class Caller(asimpy.Process):
     """A client who places calls during working hours."""
 
-    def init(self, rng, pool, calls, call_id, details):
+    def init(self, rng, pool, records, call_id, details):
         self.rng = rng
         self.pool = pool
-        self.calls = calls
+        self.records = records
         self.call_id = call_id
         self.ident = details["ident"]
         self.call_interval = details["call_interval"]
@@ -231,7 +233,7 @@ class Caller(asimpy.Process):
                 duration = CALL_FAILED_DURATION_HOURS
                 agent_ident = None
 
-            self.calls.append(
+            self.records["calls"].append(
                 {
                     "ident": next(self.call_id),
                     "caller": self.ident,
@@ -248,16 +250,22 @@ class Caller(asimpy.Process):
 
 
 def simulate(rng, clients, agents_df):
-    env = asimpy.Environment()
     pool = []
+    records = {
+        "calls": [],
+    }
+    call_id = id_generator("X", 6)
+
+    env = asimpy.Environment()
     for row in agents_df.iter_rows(named=True):
         Agent(env, rng, pool, row)
-    calls = []
-    call_id = id_generator("X", 6)
     for row in clients.iter_rows(named=True):
-        Caller(env, rng, pool, calls, call_id, row)
+        Caller(env, rng, pool, records, call_id, row)
     env.run(until=SIMULATION_TIME)
-    return pl.from_dicts(calls)
+
+    for key, data in records.items():
+        records[key] = pl.from_dicts(data)
+    return records
 
 
 # ----------------------------------------------------------------------
