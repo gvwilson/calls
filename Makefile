@@ -1,17 +1,21 @@
 .PHONY: docs
 all: commands
 
-## simple: re-create database with no shocks to the system
-noshock:
+## plain: re-create database with no shocks to the system
+plain:
 	@python sim.py --db calls.db
 
-## newclients: re-create database with new clients
-newclients:
-	@python sim.py --db calls.db --shock newclients
+## automation: re-create database with automation effects
+automation:
+	@python sim.py --db calls.db --shock automation
 
 ## followup: re-create database with increase in followup time
 followup:
 	@python sim.py --db calls.db --shock followup
+
+## newclients: re-create database with new clients
+newclients:
+	@python sim.py --db calls.db --shock newclients
 
 ## ---: ---
 

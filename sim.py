@@ -12,37 +12,59 @@ import asimpy
 from asimpy.interrupt import Interrupt
 from sqlalchemy import create_engine
 
+# Default random number generation seed.
 SEED = 192738
+
+# Locale for personal names.
 LOCALE = "et_EE"
+
+# (Initial) number of clients.
 NUM_CLIENTS = 5
+
+# (Initial) number of agents.
 NUM_AGENTS = 3
 
-CALL_INTERVAL_MU = np.log(8.0)
-CALL_INTERVAL_SIGMA = 0.5
-CALL_DURATION_MU = 0.2
-CALL_FRAC_LONG = 0.2
-CALL_MULT_LONG = 2.0
-
-FOLLOWUP_DURATION_MU = 10 / 60 # 5 minutes
-
-SIMULATION_EPOCH = datetime(2025, 1, 6, 9, 0)
+# Duration of simulation.
+SIMULATION_START = datetime(2025, 1, 6, 9, 0)
 WORK_HOURS_PER_DAY = 8
 WORK_DAYS_PER_WEEK = 5
 HOURS_PER_DAY = 24
 HOURS_PER_WEEK = 7 * HOURS_PER_DAY
 
-# 200 compacted working hours = 5 working weeks = 840 real hours
+# 200 compacted working hours.
 SIMULATION_WORK_HOURS = 200.0
 SIMULATION_TIME = (
     SIMULATION_WORK_HOURS / (WORK_HOURS_PER_DAY * WORK_DAYS_PER_WEEK) * HOURS_PER_WEEK
 )
 
+# Parameters for generating per-client intervals between calls.
+CALL_INTERVAL_MU = np.log(8.0)
+CALL_INTERVAL_SIGMA = 0.5
+
+# Parameter for generating call duration.
+CALL_DURATION_MU = 0.2
+
+# Fraction of callers who create long calls, and how much longer those calls are.
+CALL_FRAC_LONG = 0.2
+CALL_MULT_LONG = 2.0
+
+# Mean time agents need to follow up after a call completes.
+FOLLOWUP_DURATION_MU = 10 / 60 # 5 minutes
+
+# Fraction of call records missing the client ID.
 CALL_ID_MISSING_FRAC = 0.05
 
-# Duration recorded for a call that finds no available agent (hours)
-CALL_FAILED_DURATION_HOURS = 1 / 60  # one minute
+# Duration recorded for a call that finds no available agent.
+CALL_FAILED_DURATION_HOURS = 1 / 60
 
+# How much the client pool increases if new clients are added.
 NEW_CLIENT_FRAC = 0.5
+
+# How much agent response time increases.
+FOLLOWUP_MULTIPLIER = 2.0
+
+# How much automation decreases call duration.
+AUTOMATION_EFFECT = 0.5
 
 # ----------------------------------------------------------------------
 
@@ -185,15 +207,19 @@ class Shock(asimpy.Process):
             case None:
                 pass
 
+            case "automation":
+                for client in Client._all:
+                    client.call_duration_mean *= AUTOMATION_EFFECT
+
+            case "followup":
+                for agent in Agent._all:
+                    agent.followup_time *= FOLLOWUP_MULTIPLIER
+
             case "newclients":
                 num_new_clients = int(NEW_CLIENT_FRAC * NUM_CLIENTS)
                 self.world.more_clients = make_clients(self.world, num_new_clients)
                 for row in self.world.more_clients.iter_rows(named=True):
                     Client(self._env, self.world, row)
-
-            case "followup":
-                for agent in Agent._all:
-                    agent.followup_time *= 2
 
             case _:
                 raise ValueError(f"unknown shock {self.shock}")
@@ -290,9 +316,9 @@ def mangle_calls(world, records):
 def next_work_time(t):
     """Return the earliest time >= t that falls within working hours.
 
-    Simulation time is real hours from SIMULATION_EPOCH (Mon 09:00).
-    Working windows within each 168-hour week start at hours 0, 24,
-    48, 72, and 96, each spanning 8 hours (09:00–17:00).
+    Simulation time is real hours from SIMULATION_START.  Working
+    windows within each 168-hour week start at hours 0, 24, 48, 72,
+    and 96, each spanning 8 hours (09:00–17:00).
     """
     week, pos = divmod(t, HOURS_PER_WEEK)
     for day in range(WORK_DAYS_PER_WEEK):
@@ -310,13 +336,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Synthesize call center data via DES")
     parser.add_argument("--db", help="Output database")
     parser.add_argument("--seed", type=int, default=SEED, help="RNG seed")
-    parser.add_argument("--shock", default=None, choices=["followup", "newclients"], help="shocks to the system")
+    parser.add_argument("--shock", default=None, choices=["automation", "followup", "newclients"], help="shocks to the system")
     return parser.parse_args()
 
 
 def real_hours_to_datetime(t):
     """Convert real simulation hours to wall-clock datetime, truncated to minute."""
-    return (SIMULATION_EPOCH + timedelta(hours=t)).replace(second=0, microsecond=0)
+    return (SIMULATION_START + timedelta(hours=t)).replace(second=0, microsecond=0)
 
 
 def real_to_compacted(t):
