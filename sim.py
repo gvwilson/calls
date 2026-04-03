@@ -2,6 +2,7 @@
 
 """Call center discrete event simulation."""
 
+import altair as alt
 import argparse
 from datetime import datetime, timedelta
 from faker import Faker
@@ -80,16 +81,25 @@ def main():
     clients = make_clients(world, NUM_CLIENTS)
     records = simulate(world, clients, agents)
 
-    if world.more_clients is not None:
-        clients = pl.concat([clients, world.more_clients])
-    mangle_calls(world, records)
+    post_process(world, records)
+    make_db(args.shock, agents, clients, records)
 
-    engine = create_engine(f"sqlite:///{Path(args.db)}")
+
+def make_db(shock, agents, clients, records):
+    """Create database."""
+    engine = create_engine(f"sqlite:///{shock}.db")
     with engine.connect() as conn:
         for name, df in (("agent", agents), ("client", clients)):
             df.write_database(name, conn, if_table_exists="replace")
         for name, df in records.items():
             df.write_database(name, conn, if_table_exists="replace")
+
+
+def post_process(world, records):
+    """Tidy up data."""
+    if world.more_clients is not None:
+        clients = pl.concat([clients, world.more_clients])
+    mangle_calls(world, records)
 
 
 # ----------------------------------------------------------------------
@@ -204,7 +214,7 @@ class Shock(asimpy.Process):
     async def run(self):
         await self.timeout(SIMULATION_TIME / 2)
         match self.world.shock:
-            case None:
+            case "plain":
                 pass
 
             case "automation":
@@ -341,12 +351,11 @@ def next_work_time(t):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Synthesize call center data via DES")
-    parser.add_argument("--db", help="Output database")
     parser.add_argument("--seed", type=int, default=SEED, help="RNG seed")
     parser.add_argument(
         "--shock",
-        default=None,
-        choices=["automation", "followup", "newclients", "special"],
+        default="plain",
+        choices=["automation", "followup", "newclients", "plain", "special"],
         help="shocks to the system"
     )
     return parser.parse_args()

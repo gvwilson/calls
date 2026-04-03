@@ -3,23 +3,23 @@ all: commands
 
 ## plain: re-create database with no shocks to the system
 plain:
-	@python sim.py --db calls.db
+	@python sim.py
 
 ## automation: re-create database with automation effects
 automation:
-	@python sim.py --db calls.db --shock automation
+	@python sim.py --shock automation
 
 ## followup: re-create database with increase in followup time
 followup:
-	@python sim.py --db calls.db --shock followup
+	@python sim.py --shock followup
 
 ## newclients: re-create database with new clients
 newclients:
-	@python sim.py --db calls.db --shock newclients
+	@python sim.py --shock newclients
 
 ## special: re-create database with special offer
 special:
-	@python sim.py --db calls.db --shock special
+	@python sim.py --shock special
 
 ## ---: ---
 
