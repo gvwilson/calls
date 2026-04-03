@@ -66,6 +66,9 @@ FOLLOWUP_MULTIPLIER = 2.0
 # How much automation decreases call duration.
 AUTOMATION_EFFECT = 0.5
 
+# How much call frequency changes when there's a special offer.
+SPECIAL_MULTIPLIER = 2.0
+
 # ----------------------------------------------------------------------
 
 
@@ -193,10 +196,7 @@ class Client(asimpy.Process):
 
 
 class Shock(asimpy.Process):
-    """Applies system-wide shocks to the simulation at scheduled times.
-
-    1. At the halfway point, doubles the followup time of every Agent.
-    """
+    """Applies system-wide shock to the simulation at scheduled time."""
 
     def init(self, world):
         self.world = world
@@ -220,6 +220,13 @@ class Shock(asimpy.Process):
                 self.world.more_clients = make_clients(self.world, num_new_clients)
                 for row in self.world.more_clients.iter_rows(named=True):
                     Client(self._env, self.world, row)
+
+            case "special":
+                for client in Client._all:
+                    client.call_interval *= SPECIAL_MULTIPLIER
+                await self.timeout(SIMULATION_TIME / 4)
+                for client in Client._all:
+                    client.call_interval /= SPECIAL_MULTIPLIER
 
             case _:
                 raise ValueError(f"unknown shock {self.shock}")
@@ -336,7 +343,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Synthesize call center data via DES")
     parser.add_argument("--db", help="Output database")
     parser.add_argument("--seed", type=int, default=SEED, help="RNG seed")
-    parser.add_argument("--shock", default=None, choices=["automation", "followup", "newclients"], help="shocks to the system")
+    parser.add_argument(
+        "--shock",
+        default=None,
+        choices=["automation", "followup", "newclients", "special"],
+        help="shocks to the system"
+    )
     return parser.parse_args()
 
 

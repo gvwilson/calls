@@ -17,6 +17,10 @@ followup:
 newclients:
 	@python sim.py --db calls.db --shock newclients
 
+## special: re-create database with special offer
+special:
+	@python sim.py --db calls.db --shock special
+
 ## ---: ---
 
 ## commands: show available commands (*)
