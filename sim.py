@@ -20,10 +20,10 @@ SEED = 192738
 LOCALE = "et_EE"
 
 # (Initial) number of clients.
-NUM_CLIENTS = 5
+NUM_CLIENTS = 12
 
 # (Initial) number of agents.
-NUM_AGENTS = 3
+NUM_AGENTS = 4
 
 # Duration of simulation.
 SIMULATION_START = datetime(2025, 1, 6, 9, 0)
@@ -31,9 +31,7 @@ WORK_HOURS_PER_DAY = 8
 WORK_DAYS_PER_WEEK = 5
 HOURS_PER_DAY = 24
 HOURS_PER_WEEK = 7 * HOURS_PER_DAY
-
-# 200 compacted working hours.
-SIMULATION_WORK_HOURS = 200.0
+SIMULATION_WORK_HOURS = 800.0
 SIMULATION_TIME = (
     SIMULATION_WORK_HOURS / (WORK_HOURS_PER_DAY * WORK_DAYS_PER_WEEK) * HOURS_PER_WEEK
 )
@@ -81,8 +79,9 @@ def main():
     clients = make_clients(world, NUM_CLIENTS)
     records = simulate(world, clients, agents)
 
-    post_process(world, records)
+    clients = post_process(world, clients, records)
     make_db(args.shock, agents, clients, records)
+    make_plots(args.shock, records)
 
 
 def make_db(shock, agents, clients, records):
@@ -95,11 +94,36 @@ def make_db(shock, agents, clients, records):
             df.write_database(name, conn, if_table_exists="replace")
 
 
-def post_process(world, records):
+def make_plots(shock, records):
+    calls = (
+        records["calls"]
+        .with_row_index("call_seq")
+        .with_columns((pl.col("call_duration") / 60).alias("call_duration_m"))
+        .drop("call_duration")
+    )
+    chart = alt.Chart(calls).mark_point().encode(
+        x="call_start_time:T",
+        y=alt.Y("call_duration_m:Q", title="Duration (minutes)"),
+        tooltip=[
+            "call_start_time:T",
+            "call_duration_m:Q"
+        ]
+    )
+    chart.save(f"{shock}.html")
+
+
+def post_process(world, clients, records):
     """Tidy up data."""
+    mangle_calls(world, records)
+
+    records["calls"] = records["calls"].with_columns(
+        pl.col("call_duration").dt.total_seconds().alias("call_duration")
+    )
+
     if world.more_clients is not None:
         clients = pl.concat([clients, world.more_clients])
-    mangle_calls(world, records)
+
+    return clients
 
 
 # ----------------------------------------------------------------------
@@ -261,11 +285,11 @@ def simulate(world, clients, agents):
 
 
 def hours_to_hms(hours):
-    """Convert a duration in fractional hours to an H:MM:SS string."""
-    total_seconds = round(hours * 3600)
-    h, remainder = divmod(total_seconds, 3600)
-    m, s = divmod(remainder, 60)
-    return f"{h}:{m:02d}:{s:02d}"
+    """Convert fractional hours to a duration."""
+    seconds = round(hours * 3600)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, sseconds = divmod(remainder, 60)
+    return timedelta(hours=hours, minutes=minutes, seconds=seconds)
 
 
 def id_generator(stem, digits):
