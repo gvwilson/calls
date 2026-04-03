@@ -1,23 +1,26 @@
 .PHONY: docs
 all: commands
 
-## plain: re-create database with no shocks to the system
+## scenarios: create all scenarios
+scenarios:
+	@make plain
+	@make followup
+	@make newclients
+	@make special
+
+## plain: create with no shocks to the system
 plain:
 	@python sim.py
 
-## automation: re-create database with automation effects
-automation:
-	@python sim.py --shock automation
-
-## followup: re-create database with increase in followup time
+## followup: create with increase in followup time
 followup:
 	@python sim.py --shock followup
 
-## newclients: re-create database with new clients
+## newclients: create with new clients
 newclients:
 	@python sim.py --shock newclients
 
-## special: re-create database with special offer
+## special: create with special offer
 special:
 	@python sim.py --shock special
 
@@ -38,7 +41,7 @@ clean:
 	@rm -rf ./dist ./tmp
 	@find . -path './.venv' -prune -o -type d -name '__pycache__' -exec rm -rf {} +
 	@find . -path './.venv' -prune -o -type f -name '*~' -exec rm {} +
-	@rm -f *.db
+	@rm -f *.db *.html
 
 ## fix: fix code issues
 fix:

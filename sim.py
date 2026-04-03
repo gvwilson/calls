@@ -20,10 +20,10 @@ SEED = 192738
 LOCALE = "et_EE"
 
 # (Initial) number of clients.
-NUM_CLIENTS = 12
+NUM_CLIENTS = 50
 
 # (Initial) number of agents.
-NUM_AGENTS = 4
+NUM_AGENTS = 12
 
 # Duration of simulation.
 SIMULATION_START = datetime(2025, 1, 6, 9, 0)
@@ -31,7 +31,7 @@ WORK_HOURS_PER_DAY = 8
 WORK_DAYS_PER_WEEK = 5
 HOURS_PER_DAY = 24
 HOURS_PER_WEEK = 7 * HOURS_PER_DAY
-SIMULATION_WORK_HOURS = 800.0
+SIMULATION_WORK_HOURS = 1600.0
 SIMULATION_TIME = (
     SIMULATION_WORK_HOURS / (WORK_HOURS_PER_DAY * WORK_DAYS_PER_WEEK) * HOURS_PER_WEEK
 )
@@ -48,7 +48,7 @@ CALL_FRAC_LONG = 0.2
 CALL_MULT_LONG = 2.0
 
 # Mean time agents need to follow up after a call completes.
-FOLLOWUP_DURATION_MU = 10 / 60 # 5 minutes
+FOLLOWUP_DURATION_MU = 1.0
 
 # Fraction of call records missing the client ID.
 CALL_ID_MISSING_FRAC = 0.05
@@ -57,16 +57,13 @@ CALL_ID_MISSING_FRAC = 0.05
 CALL_FAILED_DURATION_HOURS = 1 / 60
 
 # How much the client pool increases if new clients are added.
-NEW_CLIENT_FRAC = 0.5
+NEW_CLIENT_FRAC = 1.0
 
 # How much agent response time increases.
-FOLLOWUP_MULTIPLIER = 2.0
-
-# How much automation decreases call duration.
-AUTOMATION_EFFECT = 0.5
+FOLLOWUP_MULTIPLIER = 5.0
 
 # How much call frequency changes when there's a special offer.
-SPECIAL_MULTIPLIER = 2.0
+SPECIAL_MULTIPLIER = 5.0
 
 # ----------------------------------------------------------------------
 
@@ -81,7 +78,11 @@ def main():
 
     clients = post_process(world, clients, records)
     make_db(args.shock, agents, clients, records)
-    make_plots(args.shock, records)
+    for f in (
+            plot_call_duration_vs_time,
+            plot_calls_missed_per_day,
+    ):
+        f(args.shock, records)
 
 
 def make_db(shock, agents, clients, records):
@@ -94,7 +95,7 @@ def make_db(shock, agents, clients, records):
             df.write_database(name, conn, if_table_exists="replace")
 
 
-def make_plots(shock, records):
+def plot_call_duration_vs_time(shock, records):
     calls = (
         records["calls"]
         .with_row_index("call_seq")
@@ -108,9 +109,32 @@ def make_plots(shock, records):
             "call_start_time:T",
             "call_duration_m:Q"
         ]
-    )
-    chart.save(f"{shock}.html")
+    ).properties(title=f"{shock} call duration vs. time")
+    chart.save(f"{shock}_call_duration_vs_time.html")
 
+
+def plot_calls_missed_per_day(shock, records):
+    calls = (
+        records["calls"]
+        .filter(pl.col("agent_id").is_null())
+        .with_columns(
+            pl.col("call_start_time").dt.date().alias("day")
+        )
+        .group_by("day")
+        .agg(pl.len().alias("num_calls"))
+        .sort("day")
+    )
+    chart = (
+        alt.Chart(calls)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("day:T", title="day"),
+            y=alt.Y("num_calls:Q", title="missed calls"),
+        )
+        .properties(title=f"{shock} calls missed per day")
+    )
+    chart.save(f"{shock}_calls_missed_per_day.html")
+    
 
 def post_process(world, clients, records):
     """Tidy up data."""
@@ -241,10 +265,6 @@ class Shock(asimpy.Process):
             case "plain":
                 pass
 
-            case "automation":
-                for client in Client._all:
-                    client.call_duration_mean *= AUTOMATION_EFFECT
-
             case "followup":
                 for agent in Agent._all:
                     agent.followup_time *= FOLLOWUP_MULTIPLIER
@@ -257,10 +277,10 @@ class Shock(asimpy.Process):
 
             case "special":
                 for client in Client._all:
-                    client.call_interval *= SPECIAL_MULTIPLIER
+                    client.call_interval /= SPECIAL_MULTIPLIER
                 await self.timeout(SIMULATION_TIME / 4)
                 for client in Client._all:
-                    client.call_interval /= SPECIAL_MULTIPLIER
+                    client.call_interval *= SPECIAL_MULTIPLIER
 
             case _:
                 raise ValueError(f"unknown shock {self.shock}")
@@ -379,7 +399,7 @@ def parse_args():
     parser.add_argument(
         "--shock",
         default="plain",
-        choices=["automation", "followup", "newclients", "plain", "special"],
+        choices=["followup", "newclients", "plain", "special"],
         help="shocks to the system"
     )
     return parser.parse_args()
