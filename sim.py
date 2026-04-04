@@ -79,8 +79,8 @@ def main():
     clients = post_process(world, clients, records)
     make_db(args.shock, agents, clients, records)
     for f in (
-            plot_call_duration_vs_time,
-            plot_calls_missed_per_day,
+        plot_call_duration_vs_time,
+        plot_calls_missed_per_day,
     ):
         f(args.shock, records)
 
@@ -99,17 +99,22 @@ def plot_call_duration_vs_time(shock, records):
     calls = (
         records["calls"]
         .with_row_index("call_seq")
-        .with_columns((pl.col("call_duration") / 60).alias("call_duration_m"))
-        .drop("call_duration")
+        .with_columns(
+            ((pl.col("call_end") - pl.col("call_start")).dt.total_seconds() / 60).alias(
+                "call_duration"
+            )
+        )
     )
-    chart = alt.Chart(calls).mark_point().encode(
-        x="call_start_time:T",
-        y=alt.Y("call_duration_m:Q", title="Duration (minutes)"),
-        tooltip=[
-            "call_start_time:T",
-            "call_duration_m:Q"
-        ]
-    ).properties(title=f"{shock} call duration vs. time")
+    chart = (
+        alt.Chart(calls)
+        .mark_point()
+        .encode(
+            x="call_start:T",
+            y=alt.Y("call_duration:Q", title="Duration (minutes)"),
+            tooltip=["call_start:T", "call_duration:Q"],
+        )
+        .properties(title=f"{shock} call duration vs. time")
+    )
     chart.save(f"{shock}_call_duration_vs_time.html")
 
 
@@ -117,9 +122,7 @@ def plot_calls_missed_per_day(shock, records):
     calls = (
         records["calls"]
         .filter(pl.col("agent_id").is_null())
-        .with_columns(
-            pl.col("call_start_time").dt.date().alias("day")
-        )
+        .with_columns(pl.col("call_start").dt.date().alias("day"))
         .group_by("day")
         .agg(pl.len().alias("num_calls"))
         .sort("day")
@@ -134,19 +137,13 @@ def plot_calls_missed_per_day(shock, records):
         .properties(title=f"{shock} calls missed per day")
     )
     chart.save(f"{shock}_calls_missed_per_day.html")
-    
+
 
 def post_process(world, clients, records):
     """Tidy up data."""
     mangle_calls(world, records)
-
-    records["calls"] = records["calls"].with_columns(
-        pl.col("call_duration").dt.total_seconds().alias("call_duration")
-    )
-
     if world.more_clients is not None:
         clients = pl.concat([clients, world.more_clients])
-
     return clients
 
 
@@ -155,6 +152,7 @@ def post_process(world, clients, records):
 
 class World:
     """Hold simulation artefacts."""
+
     def __init__(self, seed, shock):
         self.rng = np.random.default_rng(seed)
         self.shock = shock
@@ -191,7 +189,9 @@ class Agent(asimpy.Process):
                 await self.timeout(float("inf"))  # idle: wait to be triggered
             except Interrupt as wakeup:
                 start_time = self.now
-                await self.timeout(simple_uniform(self.world.rng, self.followup_time, None))
+                await self.timeout(
+                    simple_uniform(self.world.rng, self.followup_time, None)
+                )
                 self.world.followups.append(
                     {
                         "ident": wakeup.cause,
@@ -242,9 +242,8 @@ class Client(asimpy.Process):
                     "ident": call_id,
                     "client_id": self.ident,
                     "agent_id": agent_ident,
-                    "call_start": real_to_compacted(self.now),
-                    "call_duration": hours_to_hms(duration),
-                    "call_start_time": real_hours_to_datetime(self.now),
+                    "call_start": real_hours_to_datetime(self.now),
+                    "call_end": real_hours_to_datetime(self.now + duration),
                 }
             )
             await self.timeout(duration)
@@ -400,7 +399,7 @@ def parse_args():
         "--shock",
         default="plain",
         choices=["followup", "newclients", "plain", "special"],
-        help="shocks to the system"
+        help="shocks to the system",
     )
     return parser.parse_args()
 
