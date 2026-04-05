@@ -1,28 +1,26 @@
 .PHONY: docs
 all: commands
 
+SCRIPT=sim.py
+
 ## scenarios: create all scenarios
-scenarios:
-	@make plain
-	@make followup
-	@make newclients
-	@make special
+scenarios: plain followup newclients special
 
 ## plain: create with no shocks to the system
 plain:
-	@python sim.py
+	@python ${SCRIPT}
 
 ## followup: create with increase in followup time
 followup:
-	@python sim.py --shock followup
+	@python ${SCRIPT} --shock followup
 
 ## newclients: create with new clients
 newclients:
-	@python sim.py --shock newclients
+	@python ${SCRIPT} --shock newclients
 
 ## special: create with special offer
 special:
-	@python sim.py --shock special
+	@python ${SCRIPT} --shock special
 
 ## ---: ---
 
