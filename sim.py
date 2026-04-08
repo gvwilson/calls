@@ -7,7 +7,6 @@ import argparse
 from datetime import datetime, timedelta
 from faker import Faker
 import numpy as np
-from pathlib import Path
 import polars as pl
 from asimpy import Environment, Interrupt, Process
 from sqlalchemy import create_engine
@@ -35,6 +34,7 @@ CALL_ID_MISSING_FRAC = 0.05
 FOLLOWUP_MULTIPLIER = 5.0  # how much agent followup time increases
 NEW_CLIENT_FRAC = 1.0  # fraction of existing clients added as new clients
 SPECIAL_MULTIPLIER = 5.0  # how much call frequency increases during special offer
+OVERLOAD_CLIENT_MULTIPLIER = 3.0  # multiple of existing clients added during overload
 
 # Range for agent followup times (minutes).
 CALL_FOLLOWUP_MIN = 10  # minimum followup time; also lower bound of personal max
@@ -48,6 +48,13 @@ CALL_INTERVAL_MIN = 5  # minimum inter-call interval
 CALL_INTERVAL_MAX_MIN = 60  # 1 hour
 CALL_INTERVAL_MAX_MAX = 240  # 4 hours
 
+# Agent satisfaction rating parameters.
+AGENT_BASELINE_MIN = 3.0  # minimum baseline rating an agent can have
+AGENT_BASELINE_MAX = 5.0  # maximum baseline rating an agent can have
+FATIGUE_INCREMENT = 1.0  # fatigue added per completed call
+FATIGUE_DECAY = 0.99  # per-minute multiplicative fatigue decay during followup
+RATING_FAILED_CALL = 1  # rating assigned when no agent is available
+
 # Time conversions (minutes).
 MINUTES_PER_DAY = 24 * 60
 MINUTES_PER_WEEK = 7 * MINUTES_PER_DAY
@@ -55,7 +62,6 @@ WORK_DAY_MINUTES = WORK_HOURS_PER_DAY * 60
 
 # Total simulation duration in real minutes.
 SIMULATION_TIME = NUM_WEEKS * MINUTES_PER_WEEK
-
 
 # Display properties.
 PLOT_WIDTH = 450
@@ -93,6 +99,7 @@ def plot_all(shock, records):
     chart = alt.hconcat(
         plot_missed_calls_day(shock, records),
         plot_missed_calls_compressed(shock, records),
+        plot_ratings_over_time(shock, records),
     )
     chart.save(f"{shock}.html")
 
@@ -178,6 +185,36 @@ def plot_missed_calls_compressed(shock, records):
     )
 
 
+def plot_ratings_over_time(shock, records):
+    """Plot mean satisfaction rating per day over real wall-clock time."""
+    calls = (
+        records["calls"]
+        .with_columns(pl.col("call_start").dt.truncate("1d").alias("day_start"))
+        .group_by("day_start")
+        .agg(pl.col("rating").mean().alias("mean_rating"))
+        .sort("day_start")
+    )
+    return (
+        alt.Chart(calls)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("day_start:T", title="date"),
+            y=alt.Y(
+                "mean_rating:Q",
+                title="mean rating",
+                scale=alt.Scale(domain=[1, 5]),
+            ),
+            tooltip=[
+                alt.Tooltip("day_start:T", title="date", format="%Y-%m-%d"),
+                alt.Tooltip("mean_rating:Q", title="mean rating", format=".2f"),
+            ],
+        )
+        .properties(
+            title=f"{shock}: mean satisfaction rating per day", width=PLOT_WIDTH
+        )
+    )
+
+
 def post_process(world, clients, records):
     """Tidy up data."""
 
@@ -220,8 +257,9 @@ class Agent(Process):
     """A call center agent who handles calls then enters a wrap-up period.
 
     Agents start in the shared pool. A Client removes an agent from
-    the pool for the duration of a call, then interrupts the
-    agent. The agent waits before returning to the pool.
+    the pool for the duration of a call, then interrupts the agent.
+    The agent accumulates fatigue with each call, which decays during
+    followup. Higher fatigue lowers the satisfaction rating clients give.
     """
 
     _all = []
@@ -230,6 +268,8 @@ class Agent(Process):
         self.world = world
         self.ident = details["ident"]
         self.call_followup_max = details["call_followup_max"]
+        self.baseline_rating = details["baseline_rating"]
+        self.fatigue = 0.0
         Agent._all.append(self)
         self.world.pool.append(self)
 
@@ -243,7 +283,10 @@ class Agent(Process):
                 followup_duration = self.world.rng.uniform(
                     CALL_FOLLOWUP_MIN, self.call_followup_max
                 )
+                self.fatigue += FATIGUE_INCREMENT
                 await self.timeout(followup_duration)
+                # Fatigue decays exponentially with time spent in followup.
+                self.fatigue *= FATIGUE_DECAY**followup_duration
                 self.world.followups.append(
                     {
                         "agent_id": self.ident,
@@ -289,9 +332,14 @@ class Client(Process):
                         idx = int(self.world.rng.integers(len(self.world.pool)))
                         agent = self.world.pool.pop(idx)
                         agent_id = agent.ident
+                        # Rating is based on the agent's fatigue before this call.
+                        rating = max(
+                            1, min(5, round(agent.baseline_rating - agent.fatigue))
+                        )
                     else:
                         agent = None
                         agent_id = None
+                        rating = RATING_FAILED_CALL
                     if agent is None:
                         call_duration = CALL_FAILED_DURATION
                         call_end = minutes_to_datetime(self.now + CALL_FAILED_DURATION)
@@ -306,6 +354,7 @@ class Client(Process):
                             "call_duration": call_duration,
                             "call_end": call_end,
                             "agent_id": agent_id,
+                            "rating": rating,
                         }
                     )
                     if agent is not None:
@@ -330,6 +379,13 @@ class Shock(Process):
 
             case "newclients":
                 num_new = int(NEW_CLIENT_FRAC * NUM_CLIENTS)
+                self.world.more_clients = make_clients(self.world, num_new)
+                for row in self.world.more_clients.iter_rows(named=True):
+                    Client(self._env, self.world, row)
+
+            case "overload":
+                # Flood the center with new clients to sustain agent fatigue.
+                num_new = int(OVERLOAD_CLIENT_MULTIPLIER * NUM_CLIENTS)
                 self.world.more_clients = make_clients(self.world, num_new)
                 for row in self.world.more_clients.iter_rows(named=True):
                     Client(self._env, self.world, row)
@@ -386,7 +442,11 @@ def make_agents(world, num):
         pl.Series(
             "call_followup_max",
             world.rng.uniform(CALL_FOLLOWUP_MIN, CALL_FOLLOWUP_MAX_MAX, num),
-        )
+        ),
+        pl.Series(
+            "baseline_rating",
+            world.rng.uniform(AGENT_BASELINE_MIN, AGENT_BASELINE_MAX, num),
+        ),
     )
     return result
 
@@ -421,7 +481,7 @@ def parse_args():
     parser.add_argument(
         "--shock",
         default="plain",
-        choices=["followup", "newclients", "plain", "special"],
+        choices=["followup", "newclients", "overload", "plain", "special"],
         help="shocks to the system",
     )
     return parser.parse_args()

@@ -4,7 +4,7 @@ all: commands
 SCRIPT=sim.py
 
 ## scenarios: create all scenarios
-scenarios: plain followup newclients special
+scenarios: plain followup newclients overload special
 
 ## plain: create with no shocks to the system
 plain:
@@ -13,6 +13,10 @@ plain:
 ## followup: create with increase in followup time
 followup:
 	@python ${SCRIPT} --shock followup
+
+## overload: agents have too much work
+overload:
+	@python ${SCRIPT} --shock overload
 
 ## newclients: create with new clients
 newclients:
