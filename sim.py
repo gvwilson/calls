@@ -77,7 +77,7 @@ def main():
     clients = make_clients(world, NUM_CLIENTS)
     records = simulate(world, clients, agents)
 
-    clients = post_process(world, clients, records)
+    agents, clients = post_process(world, agents, clients, records)
     make_db(args.shock, agents, clients, records)
     plot_all(args.shock, records)
 
@@ -215,7 +215,7 @@ def plot_ratings_over_time(shock, records):
     )
 
 
-def post_process(world, clients, records):
+def post_process(world, agents, clients, records):
     """Tidy up data."""
 
     # Mangle calls.
@@ -231,7 +231,11 @@ def post_process(world, clients, records):
     if world.more_clients is not None:
         clients = pl.concat([clients, world.more_clients])
 
-    return clients
+    # Remove simulation parameters not needed in output.
+    agents = agents.drop(["call_followup_max", "baseline_rating"])
+    clients = clients.drop(["call_interval_max"])
+
+    return agents, clients
 
 
 # ----------------------------------------------------------------------
