@@ -36,6 +36,10 @@ NEW_CLIENT_FRAC = 1.0  # fraction of existing clients added as new clients
 SPECIAL_MULTIPLIER = 5.0  # how much call frequency increases during special offer
 OVERLOAD_CLIENT_MULTIPLIER = 3.0  # multiple of existing clients added during overload
 
+# Range for each client's personal mean call duration (minutes).
+CALL_DURATION_MEAN_MIN = 3   # lower bound of personal mean call duration
+CALL_DURATION_MEAN_MAX = 15  # upper bound of personal mean call duration
+
 # Range for agent followup times (minutes).
 CALL_FOLLOWUP_MIN = 10  # minimum followup time; also lower bound of personal max
 CALL_FOLLOWUP_MAX_MAX = 60  # upper bound of personal followup max
@@ -96,10 +100,19 @@ def make_db(shock, agents, clients, records):
 
 def plot_all(shock, records):
     """Create and save all plots for a scenario as a single HTML page."""
-    chart = alt.hconcat(
-        plot_missed_calls_day(shock, records),
-        plot_missed_calls_compressed(shock, records),
-        plot_ratings_over_time(shock, records),
+    chart = alt.vconcat(
+        alt.hconcat(
+            plot_missed_calls_day(shock, records),
+            plot_missed_calls_compressed(shock, records),
+        ),
+        alt.hconcat(
+            plot_ratings_over_time(shock, records),
+            plot_call_duration_by_client(shock, records),
+        ),
+        alt.hconcat(
+            plot_agent_utilization(shock, records),
+            plot_cumulative_missed_calls(shock, records),
+        ),
     )
     chart.save(f"{shock}.html")
 
@@ -215,6 +228,145 @@ def plot_ratings_over_time(shock, records):
     )
 
 
+def add_working_slot(df, time_col):
+    """Add a working_slot column (index of working hour) derived from a datetime column."""
+    return (
+        df.with_columns(
+            (pl.col(time_col) - pl.lit(SIMULATION_START))
+            .dt.total_minutes()
+            .alias("_msince")
+        )
+        .with_columns(
+            (pl.col("_msince") // MINUTES_PER_WEEK).alias("_week"),
+            ((pl.col("_msince") % MINUTES_PER_WEEK) // MINUTES_PER_DAY).alias("_day"),
+            ((pl.col("_msince") % MINUTES_PER_DAY) // 60).alias("_hour"),
+        )
+        .filter(
+            (pl.col("_day") < WORK_DAYS_PER_WEEK)
+            & (pl.col("_hour") < WORK_HOURS_PER_DAY)
+        )
+        .with_columns(
+            (
+                pl.col("_week") * WORK_DAYS_PER_WEEK * WORK_HOURS_PER_DAY
+                + pl.col("_day") * WORK_HOURS_PER_DAY
+                + pl.col("_hour")
+            ).alias("working_slot")
+        )
+        .drop(["_msince", "_week", "_day", "_hour"])
+    )
+
+
+def plot_call_duration_by_client(shock, records):
+    """Box plot of call duration per client for successful calls."""
+    calls = records["calls"].filter(pl.col("agent_id").is_not_null())
+    return (
+        alt.Chart(calls)
+        .mark_boxplot()
+        .encode(
+            x=alt.X("client_id:N", title="client"),
+            y=alt.Y("call_duration:Q", title="duration (minutes)"),
+        )
+        .properties(title=f"{shock}: call duration by client", width=PLOT_WIDTH)
+    )
+
+
+def plot_agent_utilization(shock, records):
+    """Stacked bar of agent-minutes in calls, followup, and idle per working hour."""
+    total_slots = NUM_WEEKS * WORK_DAYS_PER_WEEK * WORK_HOURS_PER_DAY
+    all_slots = pl.DataFrame({"working_slot": list(range(total_slots))})
+
+    call_slots = (
+        add_working_slot(
+            records["calls"].filter(pl.col("agent_id").is_not_null()), "call_start"
+        )
+        .group_by("working_slot")
+        .agg(pl.col("call_duration").sum().alias("call_min"))
+    )
+    combined = all_slots.join(call_slots, on="working_slot", how="left")
+
+    if not records["followups"].is_empty():
+        followup_slots = (
+            add_working_slot(records["followups"], "followup_start")
+            .group_by("working_slot")
+            .agg(pl.col("followup_duration").sum().alias("followup_min"))
+        )
+        combined = combined.join(followup_slots, on="working_slot", how="left")
+    else:
+        combined = combined.with_columns(pl.lit(0.0).alias("followup_min"))
+
+    combined = (
+        combined.fill_null(0.0)
+        .with_columns(
+            (
+                pl.lit(float(NUM_AGENTS) * 60)
+                - pl.col("call_min")
+                - pl.col("followup_min")
+            ).alias("idle_min")
+        )
+        .with_columns(
+            pl.when(pl.col("idle_min") < 0)
+            .then(0.0)
+            .otherwise(pl.col("idle_min"))
+            .alias("idle_min")
+        )
+    )
+
+    long = pl.concat([
+        combined.select("working_slot", pl.col("call_min").alias("minutes"))
+        .with_columns(pl.lit("call").alias("activity")),
+        combined.select("working_slot", pl.col("followup_min").alias("minutes"))
+        .with_columns(pl.lit("followup").alias("activity")),
+        combined.select("working_slot", pl.col("idle_min").alias("minutes"))
+        .with_columns(pl.lit("idle").alias("activity")),
+    ])
+
+    return (
+        alt.Chart(long)
+        .mark_bar()
+        .encode(
+            x=alt.X("working_slot:Q", title="working hour"),
+            y=alt.Y("minutes:Q", title="agent-minutes", stack=True),
+            color=alt.Color(
+                "activity:N",
+                scale=alt.Scale(domain=["call", "followup", "idle"]),
+                legend=alt.Legend(title="agent time"),
+            ),
+            tooltip=[
+                alt.Tooltip("working_slot:Q", title="working hour"),
+                alt.Tooltip("activity:N", title="activity"),
+                alt.Tooltip("minutes:Q", title="minutes", format=".1f"),
+            ],
+        )
+        .properties(title=f"{shock}: agent utilization", width=PLOT_WIDTH)
+    )
+
+
+def plot_cumulative_missed_calls(shock, records):
+    """Line chart of cumulative missed calls over working hours."""
+    calls = (
+        add_working_slot(
+            records["calls"].filter(pl.col("agent_id").is_null()), "call_start"
+        )
+        .group_by("working_slot")
+        .agg(pl.len().alias("missed"))
+        .sort("working_slot")
+        .with_columns(pl.col("missed").cum_sum().alias("cumulative_missed"))
+    )
+    return (
+        alt.Chart(calls)
+        .mark_line()
+        .encode(
+            x=alt.X("working_slot:Q", title="working hour"),
+            y=alt.Y("cumulative_missed:Q", title="cumulative missed calls"),
+            tooltip=[
+                alt.Tooltip("working_slot:Q", title="working hour"),
+                alt.Tooltip("cumulative_missed:Q", title="cumulative missed"),
+            ],
+        )
+        .properties(title=f"{shock}: cumulative missed calls", width=PLOT_WIDTH)
+    )
+
+
 def post_process(world, agents, clients, records):
     """Tidy up data."""
 
@@ -233,7 +385,7 @@ def post_process(world, agents, clients, records):
 
     # Remove simulation parameters not needed in output.
     agents = agents.drop(["call_followup_max", "baseline_rating"])
-    clients = clients.drop(["call_interval_max"])
+    clients = clients.drop(["call_interval_max", "call_duration_mean"])
 
     return agents, clients
 
@@ -312,6 +464,7 @@ class Client(Process):
         self.world = world
         self.ident = details["ident"]
         self.call_interval_max = details["call_interval_max"]
+        self.call_duration_mean = details["call_duration_mean"]
         Client._all.append(self)
 
     async def run(self):
@@ -348,8 +501,9 @@ class Client(Process):
                         call_duration = CALL_FAILED_DURATION
                         call_end = minutes_to_datetime(self.now + CALL_FAILED_DURATION)
                     else:
-                        call_duration = 0
-                        call_end = call_start
+                        call_duration = self.world.rng.exponential(self.call_duration_mean)
+                        await self.timeout(call_duration)
+                        call_end = minutes_to_datetime(self.now)
                     self.world.calls.append(
                         {
                             "client_id": self.ident,
@@ -461,7 +615,11 @@ def make_clients(world, num):
         pl.Series(
             "call_interval_max",
             world.rng.uniform(CALL_INTERVAL_MAX_MIN, CALL_INTERVAL_MAX_MAX, num),
-        )
+        ),
+        pl.Series(
+            "call_duration_mean",
+            world.rng.uniform(CALL_DURATION_MEAN_MIN, CALL_DURATION_MEAN_MAX, num),
+        ),
     )
     return result
 
