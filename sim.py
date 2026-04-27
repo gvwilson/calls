@@ -57,7 +57,7 @@ CALL_INTERVAL_MAX_MAX = 240  # 4 hours
 AGENT_BASELINE_MIN = 3.0  # minimum baseline rating an agent can have
 AGENT_BASELINE_MAX = 5.0  # maximum baseline rating an agent can have
 FATIGUE_INCREMENT = 1.0  # fatigue added per completed call
-FATIGUE_DECAY = 0.99  # per-minute multiplicative fatigue decay during followup
+FATIGUE_DECAY = 0.98  # per-minute multiplicative fatigue decay during followup
 RATING_FAILED_CALL = 1  # rating assigned when no agent is available
 
 # Time conversions (minutes).
