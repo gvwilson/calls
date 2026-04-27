@@ -13,8 +13,7 @@ behavior.
 
 ## Structure
 
--   The old simulation is in `sim.py` and is not to modified.
--   The new simulation that we are writing goes in `new.py`.
+-   The simulation that we are writing is in `sim.py`.
 -   Other files:
     -   `README.md`: package home page (do not modify).
     -   `LICENSE.md`: license (do not modify).
@@ -24,7 +23,7 @@ behavior.
 ## Build and Test Commands
 
 -   Repeatable actions are saved in `Makefile`.
--   For now, use `python new.py` to run the new simulation.
+-   Use `python sim.py` to run the new simulation.
 
 ## Style Rules
 

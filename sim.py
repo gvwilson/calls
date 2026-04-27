@@ -44,8 +44,9 @@ CALL_DURATION_MEAN_MAX = 15  # upper bound of personal mean call duration
 CALL_FOLLOWUP_MIN = 10  # minimum followup time; also lower bound of personal max
 CALL_FOLLOWUP_MAX_MAX = 60  # upper bound of personal followup max
 
-# Duration recorded for a call that finds no available agent (minutes).
-CALL_FAILED_DURATION = 1
+# Duration of a call that fails to connect (uniformly distributed, in minutes).
+CALL_FAILED_DURATION_MIN = 0.5   # 30 seconds
+CALL_FAILED_DURATION_MAX = 1.0   # 60 seconds; calls intended shorter than this also fail
 
 # Range for each client's personal maximum inter-call interval (minutes).
 CALL_INTERVAL_MIN = 5  # minimum inter-call interval
@@ -485,7 +486,8 @@ class Client(Process):
                     await self.timeout(interval)
                     call_id = next(self.world.call_id)
                     call_start = minutes_to_datetime(self.now)
-                    if self.world.pool:
+                    intended_duration = self.world.rng.exponential(self.call_duration_mean)
+                    if self.world.pool and intended_duration >= CALL_FAILED_DURATION_MAX:
                         idx = int(self.world.rng.integers(len(self.world.pool)))
                         agent = self.world.pool.pop(idx)
                         agent_id = agent.ident
@@ -493,17 +495,17 @@ class Client(Process):
                         rating = max(
                             1, min(5, round(agent.baseline_rating - agent.fatigue))
                         )
+                        call_duration = intended_duration
+                        await self.timeout(call_duration)
+                        call_end = minutes_to_datetime(self.now)
                     else:
                         agent = None
                         agent_id = None
                         rating = RATING_FAILED_CALL
-                    if agent is None:
-                        call_duration = CALL_FAILED_DURATION
-                        call_end = minutes_to_datetime(self.now + CALL_FAILED_DURATION)
-                    else:
-                        call_duration = self.world.rng.exponential(self.call_duration_mean)
-                        await self.timeout(call_duration)
-                        call_end = minutes_to_datetime(self.now)
+                        call_duration = self.world.rng.uniform(
+                            CALL_FAILED_DURATION_MIN, CALL_FAILED_DURATION_MAX
+                        )
+                        call_end = minutes_to_datetime(self.now + call_duration)
                     self.world.calls.append(
                         {
                             "client_id": self.ident,
