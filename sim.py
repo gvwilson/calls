@@ -101,9 +101,11 @@ def make_db(shock, agents, clients, records):
 
 def plot_all(shock, records):
     """Create and save all plots for a scenario as a single HTML page."""
+    missed_calls_day = plot_missed_calls_day(shock, records)
+    missed_calls_day.save(f"{shock}-missed.html")
     chart = alt.vconcat(
         alt.hconcat(
-            plot_missed_calls_day(shock, records),
+            missed_calls_day,
             plot_missed_calls_compressed(shock, records),
         ),
         alt.hconcat(
